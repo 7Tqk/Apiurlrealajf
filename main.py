@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Query, Request
 import httpx
-import json
 
 app = FastAPI()
 
@@ -31,13 +30,32 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
             "amount": amount
         }
 
-        # استخدام Transport للتعامل الصحيح مع البروكسي
-        transport = httpx.AsyncHTTPTransport(proxy=proxy) if proxy else None
+        # معالجة ذكية للبروكسي لمنع خطأ Invalid Port
+        formatted_proxy = None
+        if proxy:
+            # تنظيف البروكسي من أي بروتوكول مسبق
+            clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
+            
+            if "@" in clean_proxy:
+                # إذا كان بالصيغة: user:pass@ip:port
+                formatted_proxy = f"http://{clean_proxy}"
+            else:
+                parts = clean_proxy.split(":")
+                if len(parts) == 4:
+                    # إذا كان بالصيغة: ip:port:user:pass (وهو سبب الخطأ لديك)
+                    formatted_proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+                elif len(parts) == 2:
+                    # إذا كان بدون حماية: ip:port
+                    formatted_proxy = f"http://{parts[0]}:{parts[1]}"
+                else:
+                    formatted_proxy = f"http://{clean_proxy}"
+                    
+        # تمرير البروكسي بالشكل الصحيح
+        transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
 
         async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
             target_url = f"{site}/payments/authorize"
             
-            # الطلب سيتم إرساله كـ POST كما هو معتاد في بوابات الدفع
             response = await client.post(target_url, json=payload)
             
             try:
